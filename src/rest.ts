@@ -65,6 +65,9 @@ function replyNoContent(res: ServerResponse): void {
 }
 
 function decodeSeg(segment: string): string {
+  // Most segments carry no escape: decodeURIComponent is ~1us a call and the router
+  // decodes every segment of every REST path, so skip it on the plain fast path.
+  if (!segment.includes('%')) return segment;
   try {
     return decodeURIComponent(segment);
   } catch {

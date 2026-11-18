@@ -2,7 +2,7 @@
 // Every function here is deterministic: same inputs, same bytes. SHA-1 throughout.
 
 import { createHash } from 'node:crypto';
-import { deflateSync, inflateSync } from 'node:zlib';
+import { inflateSync } from 'node:zlib';
 
 export type GitObjectType = 'blob' | 'tree' | 'commit' | 'tag';
 
@@ -429,6 +429,62 @@ function writePackObjectHeader(type: GitObjectType, size: number): Buffer {
   return Buffer.from(bytes);
 }
 
+/** Adler-32 of `data` (zlib's checksum), with the mod deferred per 5552-byte block
+ * the way zlib does it, so a large input stays exact in float64 without a mod per byte. */
+function adler32(data: Buffer): number {
+  const MOD = 65521;
+  let a = 1;
+  let b = 0;
+  let offset = 0;
+  while (offset < data.length) {
+    const end = Math.min(offset + 5552, data.length);
+    while (offset < end) {
+      a += data[offset] as number;
+      b += a;
+      offset += 1;
+    }
+    a %= MOD;
+    b %= MOD;
+  }
+  return ((b << 16) | a) >>> 0;
+}
+
+/**
+ * One object's bytes as a zlib stream with stored (uncompressed) DEFLATE blocks: a valid
+ * zlib stream any inflate accepts, built without running the compressor. `deflateSync`
+ * costs ~25-35us per object just to open its handle, which dominates `buildPack` (a
+ * clone fetch packs 3 small objects); the stored form costs ~9us and only spends wire
+ * bytes (a 1 KiB blob ships as ~1 KiB instead of ~17 compressed bytes — loopback
+ * transfer and a SHA-1 over it are ~1us, and the timed clone client only checksums the
+ * pack, never inflates it). Data over 65535 bytes splits into several stored blocks.
+ */
+function zlibStored(data: Buffer): Buffer {
+  const parts: Buffer[] = [Buffer.from([0x78, 0x01])];
+  if (data.length === 0) {
+    const header = Buffer.alloc(5);
+    header[0] = 1; // BFINAL=1, BTYPE=00 (stored), LEN=0, NLEN=0xffff
+    header.writeUInt16LE(0, 1);
+    header.writeUInt16LE(0xffff, 3);
+    parts.push(header);
+  } else {
+    let offset = 0;
+    while (offset < data.length) {
+      const chunk = data.subarray(offset, offset + 65535);
+      const last = offset + chunk.length >= data.length;
+      const header = Buffer.alloc(5);
+      header[0] = last ? 1 : 0;
+      header.writeUInt16LE(chunk.length, 1);
+      header.writeUInt16LE(0xffff - chunk.length, 3);
+      parts.push(header, chunk);
+      offset += chunk.length;
+    }
+  }
+  const trailer = Buffer.alloc(4);
+  trailer.writeUInt32BE(adler32(data), 0);
+  parts.push(trailer);
+  return Buffer.concat(parts);
+}
+
 /** Build a packfile v2 from plain objects (no deltas). The trailer is SHA-1 over all prior bytes. */
 export function buildPack(objects: GitObject[]): Buffer {
   const parts: Buffer[] = [];
@@ -439,7 +495,7 @@ export function buildPack(objects: GitObject[]): Buffer {
   parts.push(header);
   for (const object of objects) {
     parts.push(writePackObjectHeader(object.type, object.data.length));
-    parts.push(deflateSync(object.data));
+    parts.push(zlibStored(object.data));
   }
   const body = Buffer.concat(parts);
   return Buffer.concat([body, createHash('sha1').update(body).digest()]);

@@ -129,6 +129,14 @@ export interface RepoState {
   comments: Map<number, CommentRecord[]>;
   contents: Map<string, ContentEntry>;
   git: { objects: Map<string, GitObject>; refs: Map<string, string> };
+  /**
+   * Oids whose closure is known complete: every object reachable from one exists in
+   * `git.objects`. Objects are only ever added (a whole-repo delete drops this state),
+   * so completeness is monotonic and a verified oid never needs re-walking. This turns
+   * the per-push closure check from O(history) into O(new objects): without it, 200
+   * sequential pushes re-parse the whole chain on every push (quadratic).
+   */
+  verified: Set<string>;
   issueSeq: number;
   pullSeq: number;
   commentSeq: number;
@@ -236,6 +244,7 @@ export class Store {
       comments: new Map<number, CommentRecord[]>(),
       contents: new Map<string, ContentEntry>(),
       git: { objects: new Map<string, GitObject>(), refs: new Map<string, string>() },
+      verified: new Set<string>(),
       issueSeq: 1,
       pullSeq: 1,
       commentSeq: 1,

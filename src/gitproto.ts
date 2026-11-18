@@ -674,13 +674,20 @@ function parseReceivePack(body: Buffer): { commands: PushCommand[]; pack: Buffer
   return { commands, pack: body.subarray(cursor.pos) };
 }
 
-/** False when `tip`'s closure names an object the store does not hold. */
-function closureComplete(objects: Map<string, GitObject>, tip: string): boolean {
+/** False when `tip`'s closure names an object the store does not hold. Oids already in
+ * `state.verified` are skipped (their closure was complete when verified, and objects are
+ * never removed), and every oid visited on a successful walk is added, so a linear push
+ * chain costs O(new objects) per push instead of O(history). A failed walk adds nothing:
+ * a later push may complete the closure, and it must be re-checked then. */
+function closureComplete(state: RepoState, tip: string): boolean {
+  const objects = state.git.objects;
+  const verified = state.verified;
+  if (verified.has(tip)) return true;
   const seen = new Set<string>();
   const queue: string[] = [tip];
   while (queue.length) {
     const oid = queue.pop()!;
-    if (seen.has(oid)) continue;
+    if (seen.has(oid) || verified.has(oid)) continue;
     const object = objects.get(oid);
     if (object === undefined) return false;
     seen.add(oid);
@@ -697,6 +704,7 @@ function closureComplete(objects: Map<string, GitObject>, tip: string): boolean 
       }
     }
   }
+  for (const oid of seen) verified.add(oid);
   return true;
 }
 
@@ -729,7 +737,7 @@ function applyPush(
   }
   for (const command of commands) {
     if (command.newOid === ZERO_OID) continue;
-    if (!closureComplete(objects, command.newOid)) {
+    if (!closureComplete(state, command.newOid)) {
       return {
         unpackOk: false,
         unpackDetail: `error: object ${command.newOid} is missing or incomplete`,

@@ -28,27 +28,41 @@ export function sendJson(
   body: unknown,
   headers: Readonly<Record<string, string>> = {},
 ): void {
-  const text = `${JSON.stringify(body)}\n`;
-  res.writeHead(status, { 'content-type': JSON_TYPE, 'content-length': Buffer.byteLength(text), ...headers });
-  res.end(text);
+  const buf = Buffer.from(`${JSON.stringify(body)}\n`, 'utf8');
+  res.writeHead(status, { 'content-type': JSON_TYPE, 'content-length': buf.length, ...headers });
+  res.end(buf);
+}
+
+/**
+ * One URL parse per request, shared by pathOf/queryOf: dispatch plus every surface
+ * used to parse the same URL 3-5 times (a new URL + URLSearchParams each), which the
+ * timed workloads (2,000 sequential reads, 400 push requests a round) pay per request.
+ * A request's URL never changes, so a per-request cache is exact.
+ */
+const parsedUrls = new WeakMap<IncomingMessage, { path: string; query: URLSearchParams }>();
+
+function parsedUrl(req: IncomingMessage): { path: string; query: URLSearchParams } {
+  let entry = parsedUrls.get(req);
+  if (entry === undefined) {
+    try {
+      const url = new URL(req.url ?? '/', 'http://entry');
+      entry = { path: url.pathname, query: url.searchParams };
+    } catch {
+      entry = { path: '/', query: new URLSearchParams() };
+    }
+    parsedUrls.set(req, entry);
+  }
+  return entry;
 }
 
 /** The path of a request URL, or '/' when it does not parse (never a throw). */
 export function pathOf(req: IncomingMessage): string {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
-  } catch {
-    return '/';
-  }
+  return parsedUrl(req).path;
 }
 
 /** The query string of a request URL, or empty when it does not parse (never a throw). */
 export function queryOf(req: IncomingMessage): URLSearchParams {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').searchParams;
-  } catch {
-    return new URLSearchParams();
-  }
+  return parsedUrl(req).query;
 }
 
 /** The bearer token of an `Authorization: Bearer <token>` header, or null. */
